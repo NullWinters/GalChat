@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Iterable
 from langchain.tools import tool
 
 class Message(BaseModel):
@@ -32,12 +32,20 @@ class ChatOption(BaseModel):
     Content:str=Field(..., description="推荐用户发送的文本")
     length:int=Field(...,description="该文本的长度")
 
+class OptionList(BaseModel):
+    """选项列表类"""
+    Contents:List[ChatOption]=Field(..., description="选项列表")
+    length:int=Field(...,description="列表长度")
+
 @tool
-def get_text_length(text:str, *args)->int|Tuple[int, ...]:
-    """输入单个文本返回该文本的长度，输入一组文本以元组返回文本的长度"""
-    if args:
-        lengths=[len(text)]
-        for t in args:
-            lengths.append(len(t))
-        return tuple(lengths)
-    return len(text)
+def get_length(*args:Iterable)-> int | tuple[int, ...] | ValueError:
+    """输入单个可叠代对象返回该可叠代对象的长度，输入一组可叠代对象则以元组返回各个可叠代对象的长度"""
+    try:
+        num_items = len(args)
+        if num_items == 0:
+            raise ValueError
+        if num_items == 1:
+            return len(args)
+        return tuple(len(i) for i in args)
+    except ValueError as e:
+        return e
