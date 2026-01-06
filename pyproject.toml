@@ -1,0 +1,11 @@
+[project]
+name = "GalChat"
+version = "0.1.0"
+description = "Chat Online like GalGame!"
+requires-python = ">=3.13"
+dependencies = [
+    "dotenv>=0.9.9",
+    "langchain>=1.2.0",
+    "langchain-deepseek>=1.0.1",
+    "pymysql>=1.1.2",
+]

@@ -5,9 +5,8 @@ load_dotenv()
 
 deepseek = ChatDeepSeek(
     model="deepseek-chat",
-    temperature=0.2,
-    max_tokens=128,
+    temperature=0.5,
+    max_tokens=512,
     timeout=10,
     max_retries=2
 )
-

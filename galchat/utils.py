@@ -1,44 +1,50 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional, Tuple, List, Iterable
+from typing import Optional, List, Iterable
 from langchain.tools import tool
+
 
 class Message(BaseModel):
     """聊天消息类"""
-    id:int
-    info:str
-    send_time:datetime
-    user_id:str
-    group_id:str
-    ip_addr:str
+    id: int
+    info: str
+    send_time: datetime
+    user_id: str
+    group_id: str
+    ip_addr: str
+
 
 class User(BaseModel):
     """用户类"""
-    id:str
-    name:str
-    password:str
-    sex:Optional[str]
-    profile:Optional[str]
+    id: str
+    name: str
+    password: str
+    sex: Optional[str]
+    profile: Optional[str]
+
 
 class Group(BaseModel):
     """群聊类"""
-    id:str
-    name:str
-    password:Optional[str]
-    user_count:Optional[int]
+    id: str
+    name: str
+    password: Optional[str]
+    user_count: Optional[int]
+
 
 class ChatOption(BaseModel):
     """对话选项类"""
-    Content:str=Field(..., description="推荐用户发送的文本")
-    length:int=Field(...,description="该文本的长度")
+    content: str = Field(..., description="推荐用户发送的文本")
+    length: int = Field(..., description="该文本的长度")
+
 
 class OptionList(BaseModel):
     """选项列表类"""
-    Contents:List[ChatOption]=Field(..., description="选项列表")
-    length:int=Field(...,description="列表长度")
+    contents: List[ChatOption] = Field(..., description="选项列表")
+    length: int = Field(..., description="列表长度")
+
 
 @tool
-def get_length(*args:Iterable)-> int | tuple[int, ...] | ValueError:
+def get_length(*args: Iterable) -> int | tuple[int, ...] | ValueError:
     """输入单个可叠代对象返回该可叠代对象的长度，输入一组可叠代对象则以元组返回各个可叠代对象的长度"""
     try:
         num_items = len(args)
@@ -49,3 +55,6 @@ def get_length(*args:Iterable)-> int | tuple[int, ...] | ValueError:
         return tuple(len(i) for i in args)
     except ValueError as e:
         return e
+
+def get_now_time():
+    return str(datetime.now())[:19]
