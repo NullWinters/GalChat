@@ -1,0 +1,10 @@
+galchat/config.toml
+__pycache__/
+galchat/__pycache__/
+.env
+.idea/
+.output.txt
+res/uploads/avatars/*.png
+res/uploads/fileMsgs/
+test.py
+uv.lock
