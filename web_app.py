@@ -1,20 +1,26 @@
 import os
 import sys
+import json
+import hashlib
+import shutil
+import asyncio
+import bleach
+import io
+from PIL import Image
+from datetime import datetime
+from pydantic import BaseModel
 from typing import Optional, List
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
-from pydantic import BaseModel
-import json
-from datetime import datetime
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, UploadFile, File
 
 # 将当前目录添加到路径以便导入 galchat
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+from sqlalchemy import select
 from galchat.agent import Generator
 from galchat.utils import _get_now_time as get_now_time
-from galchat.database import AsyncSessionLocal, DBRoom, DBMessage, DBUser, DBUserRoom, init_db
-from sqlalchemy import select
+from galchat.database import AsyncSessionLocal, DBRoom, DBMessage, DBUser, DBUserRoom, DBFile, DBAvatar, init_db, clear_db, backup_db
 
 # 加载 App 配置以支持分享功能
 try:
@@ -29,11 +35,42 @@ def load_app_config():
         config = tomllib.load(f)
     return config.get("App", {})
 
+def sanitize_text(text: str) -> str:
+    """清理文本，防止 XSS"""
+    if not text:
+        return ""
+    # 默认不允许任何标签
+    return bleach.clean(text, tags=[], attributes={}, strip=True)
+
 app = FastAPI(title="GalChat Web API")
 
 @app.on_event("startup")
 async def startup_event():
-    await init_db()
+    config = load_app_config()
+    if config.get("delete_history", False):
+        print("检测到 delete_history=True，正在清空数据库...")
+        await clear_db()
+        print("数据库已清空。")
+    else:
+        await init_db()
+    
+    # 启动异步备份任务
+    backup_interval = config.get("backup_interval", 60) # 默认60分钟
+    if backup_interval > 0:
+        asyncio.create_task(backup_task(backup_interval))
+
+async def backup_task(interval_minutes: int):
+    """异步备份任务"""
+    print(f"备份任务已启动，每 {interval_minutes} 分钟备份一次。")
+    while True:
+        try:
+            # 等待指定的间隔时间
+            await asyncio.sleep(interval_minutes * 60)
+            print(f"[{datetime.now()}] 正在执行自动备份...")
+            await backup_db()
+            print(f"[{datetime.now()}] 自动备份完成。")
+        except Exception as e:
+            print(f"备份过程中出错: {e}")
 
 # 聊天室连接管理 (保持内存中的连接，但数据持久化到数据库)
 class ConnectionManager:
@@ -83,16 +120,88 @@ class CreateRoomRequest(BaseModel):
 class LeaveRoomRequest(BaseModel):
     room_id: str
 
+class UpdateNicknameRequest(BaseModel):
+    nickname: str
+    room_id: str
+    avatar_id: Optional[int] = None
+
+@app.get("/api/user/info")
+async def get_user_info(fastapi_request: Request, room_id: Optional[str] = None):
+    client_ip = fastapi_request.client.host if fastapi_request.client else "127.0.0.1"
+    async with AsyncSessionLocal() as session:
+        nickname = client_ip
+        avatar_path = DEFAULT_AVATAR
+        if room_id:
+            result = await session.execute(
+                select(DBUserRoom, DBAvatar)
+                .outerjoin(DBAvatar, DBUserRoom.avatar_id == DBAvatar.id)
+                .where(DBUserRoom.user_ip == client_ip, DBUserRoom.room_id == room_id)
+            )
+            row = result.first()
+            if row:
+                ur, avatar = row
+                if ur.nickname:
+                    nickname = ur.nickname
+                if avatar:
+                    avatar_path = avatar.avatar_path
+        
+        return {"ip": client_ip, "nickname": nickname, "avatar_path": avatar_path}
+
+@app.post("/api/user/nickname")
+async def update_nickname(request: UpdateNicknameRequest, fastapi_request: Request):
+    client_ip = fastapi_request.client.host if fastapi_request.client else "127.0.0.1"
+    
+    clean_nickname = sanitize_text(request.nickname)
+    if not clean_nickname:
+        clean_nickname = client_ip
+        
+    async with AsyncSessionLocal() as session:
+        # 确保用户和房间关系存在
+        result = await session.execute(
+            select(DBUserRoom).where(DBUserRoom.user_ip == client_ip, DBUserRoom.room_id == request.room_id)
+        )
+        ur = result.scalar_one_or_none()
+        if not ur:
+            # 如果不存在关系，先检查房间是否存在
+            room_result = await session.execute(select(DBRoom).where(DBRoom.room_id == request.room_id))
+            if not room_result.scalar_one_or_none():
+                raise HTTPException(status_code=404, detail="Room not found")
+            
+            ur = DBUserRoom(user_ip=client_ip, room_id=request.room_id, nickname=clean_nickname, avatar_id=request.avatar_id)
+            session.add(ur)
+        else:
+            ur.nickname = clean_nickname
+            if request.avatar_id is not None:
+                ur.avatar_id = request.avatar_id
+        
+        await session.commit()
+        
+        # 获取最新的头像路径
+        avatar_path = DEFAULT_AVATAR
+        if ur.avatar_id:
+            avatar_res = await session.execute(select(DBAvatar).where(DBAvatar.id == ur.avatar_id))
+            avatar_obj = avatar_res.scalar_one_or_none()
+            if avatar_obj:
+                avatar_path = avatar_obj.avatar_path
+
+        return {"status": "success", "nickname": clean_nickname, "avatar_path": avatar_path}
+
 @app.post("/api/rooms/create")
 async def create_room(request: CreateRoomRequest):
+    clean_room_id = sanitize_text(request.room_id)
+    clean_name = sanitize_text(request.name)
+    
+    if not clean_room_id or not clean_name:
+        raise HTTPException(status_code=400, detail="无效的群聊ID或名称")
+
     async with AsyncSessionLocal() as session:
         # 检查房间是否存在
-        result = await session.execute(select(DBRoom).where(DBRoom.room_id == request.room_id))
+        result = await session.execute(select(DBRoom).where(DBRoom.room_id == clean_room_id))
         if result.scalar_one_or_none():
             raise HTTPException(status_code=400, detail="ID已存在")
         
         # 创建新房间
-        new_room = DBRoom(room_id=request.room_id, name=request.name)
+        new_room = DBRoom(room_id=clean_room_id, name=clean_name)
         session.add(new_room)
         await session.commit()
         return {"status": "success"}
@@ -139,6 +248,137 @@ async def leave_room(request: LeaveRoomRequest, fastapi_request: Request):
 async def get_share_config():
     app_config = load_app_config()
     return {"share_text": app_config.get("share_text", "")}
+
+UPLOAD_DIR = "res/uploads/fileMsgs"
+AVATAR_DIR = "res/uploads/avatars"
+DEFAULT_AVATAR = "/res/uploads/avatars/default.ico"
+
+@app.post("/api/upload/avatar")
+async def upload_avatar(file: UploadFile = File(...)):
+    # 确保目录存在
+    os.makedirs(AVATAR_DIR, exist_ok=True)
+    
+    # 检查是否是图像
+    try:
+        content = await file.read()
+        img = Image.open(io.BytesIO(content))
+        img.verify() # 验证图像完整性
+        
+        # 重新打开以进行处理，因为 verify() 后不能再操作
+        img = Image.open(io.BytesIO(content))
+        
+        # 缩放为正方形
+        width, height = img.size
+        size = min(width, height)
+        left = (width - size) / 2
+        top = (height - size) / 2
+        right = (width + size) / 2
+        bottom = (height + size) / 2
+        img = img.crop((left, top, right, bottom))
+        img = img.resize((200, 200), Image.Resampling.LANCZOS)
+        
+        # 转回字节流计算摘要
+        out_buffer = io.BytesIO()
+        # 统一保存为 PNG 或原格式？建议统一为 PNG 以保证兼容性，或者保留原格式。
+        # 这里统一转为 PNG 比较安全。
+        img.save(out_buffer, format="PNG")
+        processed_content = out_buffer.getvalue()
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"无效的图像文件: {e}")
+
+    digest = hashlib.sha256(processed_content).hexdigest()
+    
+    async with AsyncSessionLocal() as session:
+        # 检查摘要是否已存在
+        result = await session.execute(select(DBAvatar).where(DBAvatar.digest == digest))
+        db_avatar = result.scalar_one_or_none()
+        
+        if not db_avatar:
+            # 保存新头像
+            save_filename = f"{digest}.png"
+            file_path = os.path.join(AVATAR_DIR, save_filename)
+            
+            with open(file_path, "wb") as f:
+                f.write(processed_content)
+            
+            db_avatar = DBAvatar(digest=digest, avatar_path=f"/res/uploads/avatars/{save_filename}")
+            session.add(db_avatar)
+            await session.commit()
+            await session.refresh(db_avatar)
+        
+        return {
+            "status": "success",
+            "avatar_id": db_avatar.id,
+            "avatar_path": db_avatar.avatar_path
+        }
+
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...)):
+    # 确保目录存在
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    
+    # 清理文件名
+    clean_filename = sanitize_text(file.filename)
+    if not clean_filename:
+        clean_filename = "unnamed_file"
+
+    # 读取内容以计算摘要
+    content = await file.read()
+    digest = hashlib.sha256(content).hexdigest()
+    
+    async with AsyncSessionLocal() as session:
+        # 检查摘要是否已存在
+        result = await session.execute(select(DBFile).where(DBFile.digest == digest))
+        db_file = result.scalar_one_or_none()
+        
+        if not db_file:
+            # 如果不存在，保存文件
+            file_ext = os.path.splitext(file.filename)[1]
+            save_filename = f"{digest}{file_ext}"
+            file_path = os.path.join(UPLOAD_DIR, save_filename)
+            
+            with open(file_path, "wb") as f:
+                f.write(content)
+            
+            # 添加到数据库
+            db_file = DBFile(digest=digest, file_path=file_path)
+            session.add(db_file)
+            await session.commit()
+            await session.refresh(db_file)
+        
+        return {
+            "status": "success",
+            "file_id": db_file.id,
+            "filename": clean_filename
+        }
+
+@app.get("/api/download/{message_id}")
+async def download_file(message_id: int):
+    async with AsyncSessionLocal() as session:
+        # 获取消息及其关联文件
+        result = await session.execute(
+            select(DBMessage).where(DBMessage.id == message_id)
+        )
+        msg = result.scalar_one_or_none()
+        
+        if not msg or msg.message_type != "file" or not msg.file_id:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # 获取文件信息
+        file_result = await session.execute(
+            select(DBFile).where(DBFile.id == msg.file_id)
+        )
+        db_file = file_result.scalar_one_or_none()
+        
+        if not db_file or not os.path.exists(db_file.file_path):
+            raise HTTPException(status_code=404, detail="File content missing")
+        
+        return FileResponse(
+            path=db_file.file_path,
+            filename=msg.text, # 使用消息中的文本作为下载文件名
+            media_type="application/octet-stream"
+        )
 
 @app.post("/api/generate")
 async def generate_options(request: ChatRequest, fastapi_request: Request):
@@ -226,45 +466,110 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
         await manager.connect(room_id, websocket)
         
         # 告诉客户端它的 IP，方便前端判断“我”
-        await websocket.send_json({"type": "init", "your_ip": client_ip, "room_name": room.name})
+        ur_info_result = await session.execute(
+            select(DBUserRoom, DBAvatar)
+            .outerjoin(DBAvatar, DBUserRoom.avatar_id == DBAvatar.id)
+            .where(DBUserRoom.user_ip == client_ip, DBUserRoom.room_id == room_id)
+        )
+        row = ur_info_result.first()
+        current_ur, current_avatar = row if row else (None, None)
+        current_nickname = current_ur.nickname if current_ur and current_ur.nickname else client_ip
+        current_avatar_path = current_avatar.avatar_path if current_avatar else DEFAULT_AVATAR
+        
+        await websocket.send_json({
+            "type": "init", 
+            "your_ip": client_ip, 
+            "your_nickname": current_nickname,
+            "your_avatar": current_avatar_path,
+            "room_name": room.name
+        })
 
         # 获取历史消息并发给客户端
         msg_result = await session.execute(
             select(DBMessage).where(DBMessage.room_id == room_id).order_by(DBMessage.id.asc())
         )
         history = msg_result.scalars().all()
+        
+        # 预先获取所有相关的昵称和头像（从 user_rooms 表获取该房间的特定昵称）
+        all_user_ips = set(msg.user_ip for msg in history)
+        nickname_map = {}
+        avatar_map = {}
+        if all_user_ips:
+            ur_avatar_result = await session.execute(
+                select(DBUserRoom, DBAvatar)
+                .outerjoin(DBAvatar, DBUserRoom.avatar_id == DBAvatar.id)
+                .where(DBUserRoom.room_id == room_id, DBUserRoom.user_ip.in_(all_user_ips))
+            )
+            for ur, avatar in ur_avatar_result.all():
+                if ur.nickname:
+                    nickname_map[ur.user_ip] = ur.nickname
+                if avatar:
+                    avatar_map[ur.user_ip] = avatar.avatar_path
+
         for msg in history:
             await websocket.send_json({
                 "type": "message",
+                "message_id": msg.id,
                 "text": msg.text,
                 "user": msg.user_ip,
-                "timestamp": msg.timestamp
+                "nickname": nickname_map.get(msg.user_ip, msg.user_ip),
+                "avatar": avatar_map.get(msg.user_ip, DEFAULT_AVATAR),
+                "timestamp": msg.timestamp,
+                "message_type": msg.message_type
             })
     
     try:
         while True:
             data = await websocket.receive_text()
             message_data = json.loads(data)
+            text_content = message_data.get("text", "")
+            
+            # 清理消息内容
+            clean_text = sanitize_text(text_content)
+            if not clean_text and text_content:
+                clean_text = "[包含不安全内容]"
             
             # 准备要广播的消息
+            async with AsyncSessionLocal() as session:
+                ur_res = await session.execute(
+                    select(DBUserRoom, DBAvatar)
+                    .outerjoin(DBAvatar, DBUserRoom.avatar_id == DBAvatar.id)
+                    .where(DBUserRoom.user_ip == client_ip, DBUserRoom.room_id == room_id)
+                )
+                row = ur_res.first()
+                ur_obj, avatar_obj = row if row else (None, None)
+                nickname = ur_obj.nickname if ur_obj and ur_obj.nickname else client_ip
+                avatar_path = avatar_obj.avatar_path if avatar_obj else DEFAULT_AVATAR
+
             timestamp = get_now_time()
-            broadcast_msg = {
-                "type": "message",
-                "text": message_data["text"],
-                "user": client_ip,
-                "timestamp": timestamp
-            }
+            message_type = message_data.get("message_type", "text")
             
             # 持久化消息到数据库
             async with AsyncSessionLocal() as session:
                 new_msg = DBMessage(
                     room_id=room_id,
                     user_ip=client_ip,
-                    text=message_data["text"],
-                    timestamp=timestamp
+                    text=clean_text,
+                    timestamp=timestamp,
+                    message_type=message_type,
+                    file_id=message_data.get("file_id")
                 )
                 session.add(new_msg)
                 await session.commit()
+                await session.refresh(new_msg)
+                message_id = new_msg.id
+
+            broadcast_msg = {
+                "type": "message",
+                "message_id": message_id,
+                "text": clean_text,
+                "user": client_ip,
+                "nickname": nickname,
+                "avatar": avatar_path,
+                "timestamp": timestamp,
+                "message_type": message_type,
+                "file_id": message_data.get("file_id")
+            }
             
             # 广播消息
             await manager.broadcast(room_id, broadcast_msg)
@@ -276,7 +581,9 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
 
 # 挂载静态文件
 os.makedirs("static", exist_ok=True)
+os.makedirs("res/uploads/avatars", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/res", StaticFiles(directory="res"), name="res")
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
@@ -289,6 +596,18 @@ async def delete_group_icon():
 @app.get("/res/share.ico", include_in_schema=False)
 async def share_icon():
     return FileResponse("res/share.ico")
+
+@app.get("/res/setting.ico", include_in_schema=False)
+async def setting_icon():
+    return FileResponse("res/setting.ico")
+
+@app.get("/res/file.ico", include_in_schema=False)
+async def file_icon():
+    return FileResponse("res/file.ico")
+
+@app.get("/res/download.ico", include_in_schema=False)
+async def download_icon():
+    return FileResponse("res/download.ico")
 
 @app.get("/")
 async def get_index():

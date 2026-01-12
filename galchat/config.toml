@@ -48,4 +48,6 @@ password = "Null_200608_ubuntu"
 database = "galchat_db"
 
 [App]
+delete_history = false
+backup_interval = 60
 share_text = "快来加入 GalChat，和我一起体验 AI 辅助聊天的乐趣吧！地址：http://180.160.173.240:50000/"

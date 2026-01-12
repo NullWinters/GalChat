@@ -1,8 +1,8 @@
-from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional, List, Iterable
 from langchain.tools import tool
 from galchat.llm import deepseek
+from pydantic import BaseModel, Field
+from typing import Optional, List, Iterable
 
 
 def get_model(model_name: str):
@@ -64,9 +64,11 @@ def get_length(*args: Iterable) -> int | tuple[int, ...] | ValueError:
     except ValueError as e:
         return e
 
+
 def _get_now_time() -> str:
     """获取当前时间"""
     return str(datetime.now())[:19]
+
 
 @tool
 def get_now_time() -> str:

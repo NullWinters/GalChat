@@ -4,8 +4,8 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import argparse
-from galchat.utils import _get_now_time as get_now_time
 from galchat.agent import Generator
+from galchat.utils import _get_now_time as get_now_time
 
 
 def main():

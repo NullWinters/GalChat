@@ -48,8 +48,13 @@
     <div class="flex-1 flex flex-col h-full bg-gray-50 relative">
         <!-- Header -->
         <header id="chatHeader" class="bg-white shadow-sm p-4 h-16 flex items-center justify-between shrink-0">
-            <h2 id="currentRoomName" class="text-lg font-bold text-gray-800">请选择或加入群聊</h2>
-            <div id="currentRoomId" class="text-xs text-gray-400"></div>
+            <div class="flex items-center gap-4">
+                <h2 id="currentRoomName" class="text-lg font-bold text-gray-800">请选择或加入群聊</h2>
+                <div id="currentRoomId" class="text-xs text-gray-400"></div>
+            </div>
+            <button id="settingBtn" class="p-2 rounded-full hover:bg-gray-100 transition-colors hidden" title="设置">
+                <img src="/res/setting.ico" class="w-5 h-5" alt="setting">
+            </button>
         </header>
 
         <!-- Chat History -->
@@ -73,7 +78,11 @@
         <!-- Input Area -->
         <footer id="inputArea" class="p-4 bg-white border-t hidden">
             <div class="max-w-4xl mx-auto">
-                <div class="flex gap-2">
+                <div class="flex gap-2 items-center">
+                    <button id="uploadBtn" class="p-2 rounded-lg hover:bg-gray-100 transition-colors shrink-0" title="上传文件">
+                        <img src="/res/file.ico" class="w-6 h-6" alt="upload">
+                    </button>
+                    <input type="file" id="fileInput" class="hidden">
                     <textarea id="userInput" 
                         class="flex-1 border border-gray-300 rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none text-sm"
                         placeholder="输入消息..." rows="2"></textarea>
@@ -124,6 +133,34 @@
         </div>
     </div>
 
+    <!-- Setting Modal -->
+    <div id="settingModal" class="modal items-center justify-center">
+        <div class="bg-white rounded-lg p-6 w-80 shadow-xl">
+            <h3 class="text-lg font-bold mb-4">用户设置</h3>
+            <div class="space-y-4">
+                <div class="flex flex-col gap-2 mb-2">
+                    <label class="block text-xs font-medium text-gray-700">群头像</label>
+                    <div class="flex items-center gap-4">
+                        <button id="uploadAvatarBtn" class="bg-gray-100 text-gray-700 px-4 py-2 rounded-md text-sm hover:bg-gray-200 transition-colors border border-gray-300">
+                            上传群头像
+                        </button>
+                        <img id="settingAvatarPreview" src="/res/uploads/avatars/default.ico" class="w-12 h-12 rounded-full border shadow-sm object-cover" alt="avatar">
+                    </div>
+                    <input type="file" id="avatarFileInput" class="hidden" accept="image/*">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-gray-700 mb-1">我的群昵称</label>
+                    <input type="text" id="userNickname" class="w-full border rounded-md p-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="输入新昵称">
+                    <p class="text-[10px] text-gray-400 mt-1">留空将默认使用 IP 地址</p>
+                </div>
+            </div>
+            <div class="flex justify-end gap-2 mt-6">
+                <button onclick="closeModal('settingModal')" class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-md">取消</button>
+                <button id="confirmSetting" class="px-4 py-2 text-sm bg-blue-500 text-white rounded-md hover:bg-blue-600">确定</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Share Modal -->
     <div id="shareModal" class="modal items-center justify-center">
         <div class="bg-white rounded-lg p-6 w-96 shadow-xl">
@@ -152,13 +189,23 @@
         const currentRoomIdEl = document.getElementById('currentRoomId');
         const inputArea = document.getElementById('inputArea');
         const suggestionArea = document.getElementById('suggestionArea');
+        const settingBtn = document.getElementById('settingBtn');
+        const userNicknameInput = document.getElementById('userNickname');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const fileInput = document.getElementById('fileInput');
+        const avatarFileInput = document.getElementById('avatarFileInput');
+        const settingAvatarPreview = document.getElementById('settingAvatarPreview');
+        const uploadAvatarBtn = document.getElementById('uploadAvatarBtn');
 
         let socket = null;
         let myIP = null;
+        let myNickname = null;
+        let myAvatar = '/res/uploads/avatars/default.ico';
+        let currentAvatarId = null;
         let lastSender = null;
         let currentRoomId = null;
         let joinedRooms = JSON.parse(localStorage.getItem('joinedRooms') || '{}');
-        let hasGeneratedInCurrentRoom = false;
+        let roomSuggestions = {}; // 存储各个房间生成的建议选项
 
         function saveJoinedRooms() {
             localStorage.setItem('joinedRooms', JSON.stringify(joinedRooms));
@@ -209,6 +256,7 @@
 
                 if (res.ok) {
                     delete joinedRooms[id];
+                    delete roomSuggestions[id];
                     saveJoinedRooms();
                     
                     if (currentRoomId === id) {
@@ -220,6 +268,7 @@
                         currentRoomIdEl.innerText = '';
                         inputArea.classList.add('hidden');
                         suggestionArea.classList.add('hidden');
+                        settingBtn.classList.add('hidden');
                     }
                     
                     renderRoomList();
@@ -232,7 +281,70 @@
             }
         }
 
+        async function updateNickname() {
+            const nickname = userNicknameInput.value.trim();
+            if (!currentRoomId) return;
+            try {
+                const res = await fetch('/api/user/nickname', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        nickname: nickname || myIP,
+                        room_id: currentRoomId,
+                        avatar_id: currentAvatarId
+                    })
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    myNickname = data.nickname;
+                    myAvatar = data.avatar_path;
+                    closeModal('settingModal');
+                    // 刷新页面或重新加载聊天记录以更新显示
+                    if (currentRoomId) {
+                        const oldRoomId = currentRoomId;
+                        currentRoomId = null;
+                        switchRoom(oldRoomId);
+                    }
+                }
+            } catch (err) {
+                alert('更新信息失败');
+            }
+        }
+
+        document.getElementById('confirmSetting').onclick = updateNickname;
+
+        uploadAvatarBtn.onclick = () => avatarFileInput.click();
+
+        avatarFileInput.onchange = async () => {
+            const file = avatarFileInput.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const res = await fetch('/api/upload/avatar', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    currentAvatarId = data.avatar_id;
+                    settingAvatarPreview.src = data.avatar_path;
+                } else {
+                    alert(data.detail || '头像上传失败');
+                }
+            } catch (err) {
+                alert('网络错误，头像上传失败');
+            }
+        };
+
         function openModal(id) {
+            if (id === 'settingModal') {
+                userNicknameInput.value = myNickname === myIP ? '' : myNickname;
+                settingAvatarPreview.src = myAvatar;
+                currentAvatarId = null; // 重置，直到用户上传新头像
+            }
             document.getElementById(id).style.display = 'flex';
         }
 
@@ -242,6 +354,7 @@
 
         document.getElementById('newRoomBtn').onclick = () => openModal('newRoomModal');
         document.getElementById('joinRoomBtn').onclick = () => openModal('joinRoomModal');
+        document.getElementById('settingBtn').onclick = () => openModal('settingModal');
         document.getElementById('shareBtn').onclick = async () => {
             document.getElementById('copySuccessHint').classList.add('hidden');
             openModal('shareModal');
@@ -317,10 +430,8 @@
         };
 
         function switchRoom(id) {
-            if (currentRoomId === id) return;
+            if (currentRoomId === id && socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
             currentRoomId = id;
-            hasGeneratedInCurrentRoom = false;
-            refreshOptionsBtn.innerText = '生成建议';
             
             // UI 更新
             currentRoomNameEl.innerText = joinedRooms[id];
@@ -328,6 +439,11 @@
             chatHistory.innerHTML = '<div class="flex h-full items-center justify-center text-gray-400 italic">正在连接群聊...</div>';
             inputArea.classList.remove('hidden');
             suggestionArea.classList.remove('hidden');
+            settingBtn.classList.remove('hidden');
+
+            // 恢复该房间的建议选项
+            renderSuggestions(id);
+            
             renderRoomList();
             
             // WebSocket 切换
@@ -368,12 +484,14 @@
                 const data = JSON.parse(event.data);
                 if (data.type === 'init') {
                     myIP = data.your_ip;
+                    myNickname = data.your_nickname || data.your_ip;
+                    myAvatar = data.your_avatar || '/res/uploads/avatars/default.ico';
                     updateGenerateBtnState();
                     return;
                 }
                 
                 if (data.type === 'message') {
-                    addMessage(data.text, data.user, data.user === myIP);
+                    addMessage(data.text, data.user, data.user === myIP, data.nickname, data.avatar, data.timestamp, data.message_id, data.message_type);
                 }
 
                 if (data.type === 'error') {
@@ -392,23 +510,87 @@
             };
         }
 
-        function addMessage(text, user, isMe) {
+        function addMessage(text, user, isMe, nickname, avatar, timestamp, messageId, messageType) {
             lastSender = user;
             updateGenerateBtnState();
 
+            const displayName = nickname || user;
+            const displayAvatar = avatar || '/res/uploads/avatars/default.ico';
+            
             const div = document.createElement('div');
-            div.className = `flex flex-col ${isMe ? 'items-end' : 'items-start'}`;
+            div.className = `flex gap-3 mb-4 ${isMe ? 'flex-row-reverse' : 'flex-row'}`;
+            
+            // 头像
+            const avatarImg = document.createElement('img');
+            avatarImg.src = displayAvatar;
+            avatarImg.className = 'w-10 h-10 rounded-full border shadow-sm object-cover shrink-0 mt-1';
+            
+            const contentDiv = document.createElement('div');
+            contentDiv.className = `flex flex-col max-w-[80%] ${isMe ? 'items-end' : 'items-start'}`;
             
             const nameSpan = document.createElement('span');
             nameSpan.className = 'text-xs text-gray-500 mb-1 px-1';
-            nameSpan.innerText = user;
+            nameSpan.innerText = displayName;
             
+            const bubbleContainer = document.createElement('div');
+            bubbleContainer.className = `flex items-center gap-2 ${isMe ? 'flex-row-reverse' : 'flex-row'}`;
+
             const bubble = document.createElement('div');
-            bubble.className = `${isMe ? 'user-message' : 'other-message'} message-bubble p-3 shadow-sm text-sm`;
-            bubble.innerHTML = text.replace(/\n/g, '<br>');
+            bubble.className = `${isMe ? 'user-message' : 'other-message'} p-3 shadow-sm text-sm cursor-pointer relative flex items-center gap-2`;
             
-            div.appendChild(nameSpan);
-            div.appendChild(bubble);
+            if (messageType === 'file') {
+                const fileIcon = document.createElement('img');
+                fileIcon.src = '/res/file.ico';
+                fileIcon.className = 'w-4 h-4 shrink-0';
+                bubble.appendChild(fileIcon);
+                
+                const textNode = document.createElement('span');
+                textNode.innerText = text;
+                textNode.className = 'truncate max-w-[200px]';
+                bubble.appendChild(textNode);
+            } else {
+                bubble.textContent = text;
+                bubble.style.whiteSpace = 'pre-wrap';
+                bubble.style.wordBreak = 'break-word';
+            }
+            
+            const actionContainer = document.createElement('div');
+            actionContainer.className = 'flex flex-col items-center gap-1 hidden';
+
+            if (messageType === 'file') {
+                const downloadBtn = document.createElement('button');
+                downloadBtn.className = 'p-1 rounded-full hover:bg-gray-200 transition-colors';
+                downloadBtn.innerHTML = `<img src="/res/download.ico" class="w-4 h-4" alt="download">`;
+                downloadBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const a = document.createElement('a');
+                    a.href = `/api/download/${messageId}`;
+                    a.style.display = 'none';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                };
+                actionContainer.appendChild(downloadBtn);
+            }
+
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'text-[10px] text-gray-400 whitespace-nowrap';
+            timeSpan.innerText = timestamp;
+            actionContainer.appendChild(timeSpan);
+
+            bubble.onclick = () => {
+                actionContainer.classList.toggle('hidden');
+            };
+
+            bubbleContainer.appendChild(bubble);
+            bubbleContainer.appendChild(actionContainer);
+
+            contentDiv.appendChild(nameSpan);
+            contentDiv.appendChild(bubbleContainer);
+            
+            div.appendChild(avatarImg);
+            div.appendChild(contentDiv);
+            
             chatHistory.appendChild(div);
             chatHistory.scrollTop = chatHistory.scrollHeight;
         }
@@ -428,38 +610,49 @@
                 });
                 
                 const result = await response.json();
-                optionsContainer.innerHTML = '';
                 
                 if (result.status === 'success' && result.data.contents && result.data.contents.length > 0) {
-                    hasGeneratedInCurrentRoom = true;
-                    refreshOptionsBtn.innerText = '刷新建议';
-                    result.data.contents.forEach(opt => {
-                        const btn = document.createElement('button');
-                        btn.className = 'option-btn bg-white border border-blue-200 text-blue-700 px-3 py-1 rounded-full text-xs hover:bg-blue-50 shadow-sm flex items-center gap-1';
-                        
-                        const contentSpan = document.createElement('span');
-                        contentSpan.innerText = opt.content;
-                        btn.appendChild(contentSpan);
-
-                        if (opt.emotion) {
-                            const emotionTag = document.createElement('span');
-                            emotionTag.className = 'bg-blue-100 text-blue-500 px-1.5 py-0.5 rounded text-[10px] font-bold';
-                            emotionTag.innerText = opt.emotion;
-                            btn.appendChild(emotionTag);
-                        }
-
-                        btn.onclick = () => {
-                            userInput.value = opt.content;
-                            userInput.focus();
-                        };
-                        optionsContainer.appendChild(btn);
-                    });
+                    roomSuggestions[currentRoomId] = result.data.contents;
+                    renderSuggestions(currentRoomId);
                 } else {
                     optionsContainer.innerHTML = '<span class="text-gray-400 text-xs italic">暂无建议，点击“生成建议”重试</span>';
                 }
             } catch (err) {
                 console.error(err);
                 optionsContainer.innerHTML = '<span class="text-red-400 text-xs italic">获取建议失败</span>';
+            }
+        }
+
+        function renderSuggestions(roomId) {
+            const suggestions = roomSuggestions[roomId] || [];
+            optionsContainer.innerHTML = '';
+            
+            if (suggestions.length > 0) {
+                refreshOptionsBtn.innerText = '刷新建议';
+                suggestions.forEach(opt => {
+                    const btn = document.createElement('button');
+                    btn.className = 'option-btn bg-white border border-blue-200 text-blue-700 px-3 py-1 rounded-full text-xs hover:bg-blue-50 shadow-sm flex items-center gap-1';
+                    
+                    const contentSpan = document.createElement('span');
+                    contentSpan.innerText = opt.content;
+                    btn.appendChild(contentSpan);
+
+                    if (opt.emotion) {
+                        const emotionTag = document.createElement('span');
+                        emotionTag.className = 'bg-blue-100 text-blue-500 px-1.5 py-0.5 rounded text-[10px] font-bold';
+                        emotionTag.innerText = opt.emotion;
+                        btn.appendChild(emotionTag);
+                    }
+
+                    btn.onclick = () => {
+                        userInput.value = opt.content;
+                        userInput.focus();
+                    };
+                    optionsContainer.appendChild(btn);
+                });
+            } else {
+                refreshOptionsBtn.innerText = '生成建议';
+                optionsContainer.innerHTML = '<span class="text-gray-400 text-xs italic">点击“生成建议”按钮获取回复选项</span>';
             }
         }
 
@@ -482,6 +675,40 @@
             } else {
                 alert('未连接到服务器');
             }
+        };
+
+        uploadBtn.onclick = () => fileInput.click();
+
+        fileInput.onchange = async () => {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const res = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+                
+                if (data.status === 'success') {
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        socket.send(JSON.stringify({
+                            text: data.filename,
+                            message_type: 'file',
+                            file_id: data.file_id
+                        }));
+                    }
+                } else {
+                    alert('文件上传失败');
+                }
+            } catch (err) {
+                alert('网络错误，文件上传失败');
+            }
+            
+            fileInput.value = ''; // 清空选择
         };
 
         refreshOptionsBtn.onclick = fetchOptions;
