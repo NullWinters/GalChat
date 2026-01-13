@@ -202,6 +202,7 @@
         let myNickname = null;
         let myAvatar = '/resources/uploads/avatars/default.ico';
         let currentAvatarId = null;
+        let pendingAvatarData = null; // 存储待上传的 Base64 头像数据
         let lastSender = null;
         let currentRoomId = null;
         let joinedRooms = JSON.parse(localStorage.getItem('joinedRooms') || '{}');

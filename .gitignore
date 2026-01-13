@@ -1,10 +1,11 @@
-galchat/config.toml
-__pycache__/
-galchat/__pycache__/
+config.toml
+**/__pycache__/
 .env
 .idea/
 .output.txt
-res/uploads/avatars/*.png
-res/uploads/fileMsgs/
+resources/uploads/avatars/*
+!resources/uploads/avatars/default.ico
+resources/uploads/fileMsgs/*
 test.py
 uv.lock
+.venv/

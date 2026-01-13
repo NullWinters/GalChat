@@ -54,8 +54,10 @@ DEEPSEEK_API_KEY=your_api_key_here
 | `model_name` | 使用的大模型名称 (目前支持 deepseek-chat) |
 | `system_prompt` | 定义 AI 助手的角色、任务及生成回复选项的逻辑 |
 | **[MySQL]** | |
-| `host`, `port` | 数据库连接地址与端口 |
-| `user`, `password` | 数据库用户名与密码 |
+| `host` | 数据库连接地址 |
+| `port` | 端口 |
+| `user` | 数据库用户名 |
+| `password` | 密码 |
 | `database` | 数据库名称 |
 | **[App]** | |
 | `delete_history` | 是否在每次启动时清空数据库 (true/false) |

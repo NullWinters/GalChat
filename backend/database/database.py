@@ -129,8 +129,11 @@ async def backup_db():
     async with engine.connect() as source_conn:
         async with backup_engine.connect() as target_conn:
             # 首先清空所有目标表（按引用的反序）
+            # 在清空前临时禁用外键检查，以确保万无一失，虽然顺序已经考虑了
+            await target_conn.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
             for table_name in tables:
-                await target_conn.execute(text(f"DELETE FROM {table_name}"))
+                await target_conn.execute(text(f"TRUNCATE TABLE {table_name}"))
+            await target_conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
             
             # 然后按依赖正序复制数据
             for table_name in reversed(tables):

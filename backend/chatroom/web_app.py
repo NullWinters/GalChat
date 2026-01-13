@@ -6,6 +6,7 @@ import shutil
 import asyncio
 import bleach
 import io
+import base64
 from PIL import Image
 from datetime import datetime
 from pydantic import BaseModel
@@ -127,6 +128,7 @@ class UpdateNicknameRequest(BaseModel):
     nickname: str
     room_id: str
     avatar_id: Optional[int] = None
+    avatar_data: Optional[str] = None # Base64 处理后的图像数据
 
 @app.get("/api/user/info")
 async def get_user_info(fastapi_request: Request, room_id: Optional[str] = None):
@@ -158,6 +160,38 @@ async def update_nickname(request: UpdateNicknameRequest, fastapi_request: Reque
         clean_nickname = client_ip
         
     async with AsyncSessionLocal() as session:
+        avatar_id = request.avatar_id
+        
+        # 如果有新的头像数据，在此计算摘要并保存
+        if request.avatar_data:
+            try:
+                # 确保目录存在
+                os.makedirs(AVATAR_DIR, exist_ok=True)
+                
+                # 解码 Base64
+                avatar_bytes = base64.b64decode(request.avatar_data)
+                digest = hashlib.sha256(avatar_bytes).hexdigest()
+                
+                # 检查摘要是否已存在
+                result = await session.execute(select(DBAvatar).where(DBAvatar.digest == digest))
+                db_avatar = result.scalar_one_or_none()
+                
+                if not db_avatar:
+                    # 保存新头像
+                    save_filename = f"{digest}.png"
+                    file_path = os.path.join(AVATAR_DIR, save_filename)
+                    with open(file_path, "wb") as f:
+                        f.write(avatar_bytes)
+                    
+                    db_avatar = DBAvatar(digest=digest, avatar_path=f"/resources/uploads/avatars/{save_filename}")
+                    session.add(db_avatar)
+                    await session.flush() # 获取新生成的 ID
+                
+                avatar_id = db_avatar.id
+            except Exception as e:
+                print(f"保存头像失败: {e}")
+                # 失败了就不更新 avatar_id
+
         # 确保用户和房间关系存在
         result = await session.execute(
             select(DBUserRoom)
@@ -165,16 +199,17 @@ async def update_nickname(request: UpdateNicknameRequest, fastapi_request: Reque
             .where(DBUserRoom.user_ip == client_ip, DBUserRoom.room_id == request.room_id)
         )
         ur = result.scalar_one_or_none()
+        
         if not ur:
             # 如果不存在关系，先检查房间是否存在
             room_result = await session.execute(select(DBRoom).where(DBRoom.room_id == request.room_id))
             if not room_result.scalar_one_or_none():
                 raise HTTPException(status_code=404, detail="Room not found")
             
-            ur = DBUserRoom(user_ip=client_ip, room_id=request.room_id, nickname=clean_nickname, avatar_id=request.avatar_id)
+            ur = DBUserRoom(user_ip=client_ip, room_id=request.room_id, nickname=clean_nickname, avatar_id=avatar_id)
             session.add(ur)
-            # 提交后重新查询以加载头像关系，或者手动加载
             await session.commit()
+            # 重新加载以获取头像路径
             result = await session.execute(
                 select(DBUserRoom)
                 .options(joinedload(DBUserRoom.avatar))
@@ -183,8 +218,8 @@ async def update_nickname(request: UpdateNicknameRequest, fastapi_request: Reque
             ur = result.scalar_one_or_none()
         else:
             ur.nickname = clean_nickname
-            if request.avatar_id is not None:
-                ur.avatar_id = request.avatar_id
+            if avatar_id is not None:
+                ur.avatar_id = avatar_id
             await session.commit()
             await session.refresh(ur, ["avatar"])
         
@@ -261,16 +296,13 @@ DEFAULT_AVATAR = "/resources/uploads/avatars/default.ico"
 
 @app.post("/api/upload/avatar")
 async def upload_avatar(file: UploadFile = File(...)):
-    # 确保目录存在
-    os.makedirs(AVATAR_DIR, exist_ok=True)
-    
     # 检查是否是图像
     try:
         content = await file.read()
         img = Image.open(io.BytesIO(content))
         img.verify() # 验证图像完整性
         
-        # 重新打开以进行处理，因为 verify() 后不能再操作
+        # 重新打开以进行处理
         img = Image.open(io.BytesIO(content))
         
         # 缩放为正方形
@@ -283,41 +315,40 @@ async def upload_avatar(file: UploadFile = File(...)):
         img = img.crop((left, top, right, bottom))
         img = img.resize((200, 200), Image.Resampling.LANCZOS)
         
-        # 转回字节流计算摘要
+        # 转回字节流
         out_buffer = io.BytesIO()
-        # 统一保存为 PNG 或原格式？建议统一为 PNG 以保证兼容性，或者保留原格式。
-        # 这里统一转为 PNG 比较安全。
         img.save(out_buffer, format="PNG")
         processed_content = out_buffer.getvalue()
         
+        # 计算摘要并保存
+        digest = hashlib.sha256(processed_content).hexdigest()
+        
+        async with AsyncSessionLocal() as session:
+            # 检查摘要是否已存在
+            result = await session.execute(select(DBAvatar).where(DBAvatar.digest == digest))
+            db_avatar = result.scalar_one_or_none()
+            
+            if not db_avatar:
+                # 确保目录存在
+                os.makedirs(AVATAR_DIR, exist_ok=True)
+                save_filename = f"{digest}.png"
+                file_path = os.path.join(AVATAR_DIR, save_filename)
+                
+                with open(file_path, "wb") as f:
+                    f.write(processed_content)
+                
+                db_avatar = DBAvatar(digest=digest, avatar_path=f"/resources/uploads/avatars/{save_filename}")
+                session.add(db_avatar)
+                await session.commit()
+                await session.refresh(db_avatar)
+            
+            return {
+                "status": "success",
+                "avatar_id": db_avatar.id,
+                "avatar_path": db_avatar.avatar_path
+            }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"无效的图像文件: {e}")
-
-    digest = hashlib.sha256(processed_content).hexdigest()
-    
-    async with AsyncSessionLocal() as session:
-        # 检查摘要是否已存在
-        result = await session.execute(select(DBAvatar).where(DBAvatar.digest == digest))
-        db_avatar = result.scalar_one_or_none()
-        
-        if not db_avatar:
-            # 保存新头像
-            save_filename = f"{digest}.png"
-            file_path = os.path.join(AVATAR_DIR, save_filename)
-            
-            with open(file_path, "wb") as f:
-                f.write(processed_content)
-            
-            db_avatar = DBAvatar(digest=digest, avatar_path=f"/res/uploads/avatars/{save_filename}")
-            session.add(db_avatar)
-            await session.commit()
-            await session.refresh(db_avatar)
-        
-        return {
-            "status": "success",
-            "avatar_id": db_avatar.id,
-            "avatar_path": db_avatar.avatar_path
-        }
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
