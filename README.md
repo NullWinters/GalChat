@@ -13,7 +13,22 @@ GalChat 是一个基于大语言模型的对话辅助系统。它能够实时分
 - **免登录体验**：通过 IP 地址自动识别身份，支持多人在线即时通讯。
 - **持久化存储**：接入 MySQL 数据库，确保用户信息、聊天室及消息历史在服务重启后依然保留。
 - **个性化体验**：针对对话中不同的参与者提供差异化的回复建议。
-- **多端接入**：提供 Web 界面、Socket 服务器 and 命令行工具。
+- **双端接入**：提供 Web 界面和 Socket 服务器。
+
+## 项目结构
+
+```
+GalChat/
+├── backend/            # 后端核心代码
+│   ├── ai/            # 智能回复建议服务 (LLM 逻辑)
+│   ├── chatroom/      # 聊天室服务 (Web & Socket)
+│   ├── database/      # 数据库操纵服务
+│   └── common/        # 通用工具类
+├── frontend/           # 前端界面文件 (HTML/JS)
+├── resources/          # 资源存储区 (图标、上传的文件、头像)
+├── config.toml         # 核心配置文件
+└── README.md
+```
 
 ## 快速开始
 
@@ -29,15 +44,23 @@ uv sync
 ```env
 DEEPSEEK_API_KEY=your_api_key_here
 ```
-2. 在 `galchat/config.toml` 中配置你的 MySQL 数据库连接信息：
-```toml
-[MySQL]
-host = "localhost"
-port = 3306
-user = "root"
-password = "your_password"
-database = "galchat_db"
-```
+2. 参考 `config.toml.template` ，在项目根目录下新建 `config.toml`。
+
+## 配置文件 (config.toml) 说明
+
+| 配置项 | 说明 |
+| :--- | :--- |
+| **[Generator]** | |
+| `model_name` | 使用的大模型名称 (目前支持 deepseek-chat) |
+| `system_prompt` | 定义 AI 助手的角色、任务及生成回复选项的逻辑 |
+| **[MySQL]** | |
+| `host`, `port` | 数据库连接地址与端口 |
+| `user`, `password` | 数据库用户名与密码 |
+| `database` | 数据库名称 |
+| **[App]** | |
+| `delete_history` | 是否在每次启动时清空数据库 (true/false) |
+| `backup_interval` | 数据库备份间隔时间 (分钟) |
+| `share_text` | 网页端分享功能显示的文案 |
 
 ---
 
@@ -49,7 +72,7 @@ database = "galchat_db"
 
 1. **启动 Web 服务器**：
    ```bash
-   uv run python web_app.py
+   uv run python backend/chatroom/web_app.py
    ```
 2. **访问界面**：
    - **本机访问**：[http://localhost:8000](http://localhost:8000)
@@ -57,7 +80,8 @@ database = "galchat_db"
 3. **功能说明**：
    - **群聊管理**：点击左侧“新建群聊”或“加入群聊”进行操作。群聊 ID 唯一。
    - **身份识别**：系统根据 IP 识别“我”和“他人”，本机消息显示在右侧。
-   - **手动触发建议**：点击“生成建议”按钮获取选项。系统会自动提取当前群聊最近的 10 条消息作为上下文。
+   - **自定义昵称/头像**：点击顶部设置图标，可为当前群聊设定独立的昵称与头像。
+   - **手动触发建议**：点击“生成建议”按钮获取选项。
    - **快捷填入**：点击生成的建议选项，内容会自动填入输入框。
 
 ### 方案二：Socket 服务器
@@ -66,7 +90,7 @@ database = "galchat_db"
 
 1. **启动服务器**：
    ```bash
-   uv run python server.py --host 127.0.0.1 --port 8888
+   uv run python backend/chatroom/server.py --host 127.0.0.1 --port 8888
    ```
 2. **请求格式**：发送 JSON 格式请求，例如：
    ```json
@@ -77,19 +101,12 @@ database = "galchat_db"
    }
    ```
 
-### 方案三：命令行工具
-
-适用于快速测试或脚本调用。
-
-```bash
-uv run python OptionsGenerator.py --input_str "你好，很高兴见到你"
-```
-
 ## 技术架构
 
 - **后端**：FastAPI + WebSocket (实时通讯)
 - **前端**：Tailwind CSS + 原生 JS
-- **核心逻辑**：LangChain + Structured Output (确保输出格式稳定)
+- **核心逻辑**：LangChain + Structured Output + Pillow (图像处理)
+- **数据库**：MySQL (SQLAlchemy + aiomysql)
 - **管理工具**：uv (依赖与环境管理)
 
 ## 许可说明
