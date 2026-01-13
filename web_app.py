@@ -17,7 +17,8 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 # 将当前目录添加到路径以便导入 galchat
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from sqlalchemy import select
+from sqlalchemy import select, delete
+from sqlalchemy.orm import joinedload
 from galchat.agent import Generator
 from galchat.utils import _get_now_time as get_now_time
 from galchat.database import AsyncSessionLocal, DBRoom, DBMessage, DBUser, DBUserRoom, DBFile, DBAvatar, init_db, clear_db, backup_db
@@ -133,17 +134,16 @@ async def get_user_info(fastapi_request: Request, room_id: Optional[str] = None)
         avatar_path = DEFAULT_AVATAR
         if room_id:
             result = await session.execute(
-                select(DBUserRoom, DBAvatar)
-                .outerjoin(DBAvatar, DBUserRoom.avatar_id == DBAvatar.id)
+                select(DBUserRoom)
+                .options(joinedload(DBUserRoom.avatar))
                 .where(DBUserRoom.user_ip == client_ip, DBUserRoom.room_id == room_id)
             )
-            row = result.first()
-            if row:
-                ur, avatar = row
+            ur = result.scalar_one_or_none()
+            if ur:
                 if ur.nickname:
                     nickname = ur.nickname
-                if avatar:
-                    avatar_path = avatar.avatar_path
+                if ur.avatar:
+                    avatar_path = ur.avatar.avatar_path
         
         return {"ip": client_ip, "nickname": nickname, "avatar_path": avatar_path}
 
@@ -158,7 +158,9 @@ async def update_nickname(request: UpdateNicknameRequest, fastapi_request: Reque
     async with AsyncSessionLocal() as session:
         # 确保用户和房间关系存在
         result = await session.execute(
-            select(DBUserRoom).where(DBUserRoom.user_ip == client_ip, DBUserRoom.room_id == request.room_id)
+            select(DBUserRoom)
+            .options(joinedload(DBUserRoom.avatar))
+            .where(DBUserRoom.user_ip == client_ip, DBUserRoom.room_id == request.room_id)
         )
         ur = result.scalar_one_or_none()
         if not ur:
@@ -169,20 +171,22 @@ async def update_nickname(request: UpdateNicknameRequest, fastapi_request: Reque
             
             ur = DBUserRoom(user_ip=client_ip, room_id=request.room_id, nickname=clean_nickname, avatar_id=request.avatar_id)
             session.add(ur)
+            # 提交后重新查询以加载头像关系，或者手动加载
+            await session.commit()
+            result = await session.execute(
+                select(DBUserRoom)
+                .options(joinedload(DBUserRoom.avatar))
+                .where(DBUserRoom.user_ip == client_ip, DBUserRoom.room_id == request.room_id)
+            )
+            ur = result.scalar_one_or_none()
         else:
             ur.nickname = clean_nickname
             if request.avatar_id is not None:
                 ur.avatar_id = request.avatar_id
+            await session.commit()
+            await session.refresh(ur, ["avatar"])
         
-        await session.commit()
-        
-        # 获取最新的头像路径
-        avatar_path = DEFAULT_AVATAR
-        if ur.avatar_id:
-            avatar_res = await session.execute(select(DBAvatar).where(DBAvatar.id == ur.avatar_id))
-            avatar_obj = avatar_res.scalar_one_or_none()
-            if avatar_obj:
-                avatar_path = avatar_obj.avatar_path
+        avatar_path = ur.avatar.avatar_path if ur.avatar else DEFAULT_AVATAR
 
         return {"status": "success", "nickname": clean_nickname, "avatar_path": avatar_path}
 
@@ -405,9 +409,22 @@ async def generate_options(request: ChatRequest, fastapi_request: Request):
                     # 翻转回来以保持正序
                     messages = list(reversed(messages))
                     
+                    # 获取昵称映射
+                    all_user_ips = set(msg.user_ip for msg in messages)
+                    nickname_map = {}
+                    if all_user_ips:
+                        ur_result = await session.execute(
+                            select(DBUserRoom)
+                            .where(DBUserRoom.room_id == request.room_id, DBUserRoom.user_ip.in_(all_user_ips))
+                        )
+                        for ur in ur_result.scalars().all():
+                            if ur.nickname:
+                                nickname_map[ur.user_ip] = ur.nickname
+                    
                     lines = []
                     for msg in messages:
-                        lines.append(f"{msg.user_ip}: {msg.text}")
+                        name = nickname_map.get(msg.user_ip, msg.user_ip)
+                        lines.append(f"{name}: {msg.text}")
                     
                     input_text = "\n".join(lines)
             
@@ -418,7 +435,18 @@ async def generate_options(request: ChatRequest, fastapi_request: Request):
                     "timestamp": get_now_time()
                 }
 
-            result = await generator.astr_generate(input_text, local_user=client_ip)
+            # 获取当前用户的昵称作为 local_user
+            local_user_display = client_ip
+            async with AsyncSessionLocal() as session:
+                if request.room_id:
+                    ur_res = await session.execute(
+                        select(DBUserRoom).where(DBUserRoom.user_ip == client_ip, DBUserRoom.room_id == request.room_id)
+                    )
+                    ur_obj = ur_res.scalar_one_or_none()
+                    if ur_obj and ur_obj.nickname:
+                        local_user_display = ur_obj.nickname
+
+            result = await generator.astr_generate(input_text, local_user=local_user_display)
         else:
             raise HTTPException(status_code=400, detail=f"不支持的模式: {request.mode}")
         
@@ -467,14 +495,13 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
         
         # 告诉客户端它的 IP，方便前端判断“我”
         ur_info_result = await session.execute(
-            select(DBUserRoom, DBAvatar)
-            .outerjoin(DBAvatar, DBUserRoom.avatar_id == DBAvatar.id)
+            select(DBUserRoom)
+            .options(joinedload(DBUserRoom.avatar))
             .where(DBUserRoom.user_ip == client_ip, DBUserRoom.room_id == room_id)
         )
-        row = ur_info_result.first()
-        current_ur, current_avatar = row if row else (None, None)
+        current_ur = ur_info_result.scalar_one_or_none()
         current_nickname = current_ur.nickname if current_ur and current_ur.nickname else client_ip
-        current_avatar_path = current_avatar.avatar_path if current_avatar else DEFAULT_AVATAR
+        current_avatar_path = current_ur.avatar.avatar_path if current_ur and current_ur.avatar else DEFAULT_AVATAR
         
         await websocket.send_json({
             "type": "init", 
@@ -490,21 +517,21 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
         )
         history = msg_result.scalars().all()
         
-        # 预先获取所有相关的昵称和头像（从 user_rooms 表获取该房间的特定昵称）
+        # 预先获取所有相关的昵称和头像
         all_user_ips = set(msg.user_ip for msg in history)
         nickname_map = {}
         avatar_map = {}
         if all_user_ips:
             ur_avatar_result = await session.execute(
-                select(DBUserRoom, DBAvatar)
-                .outerjoin(DBAvatar, DBUserRoom.avatar_id == DBAvatar.id)
+                select(DBUserRoom)
+                .options(joinedload(DBUserRoom.avatar))
                 .where(DBUserRoom.room_id == room_id, DBUserRoom.user_ip.in_(all_user_ips))
             )
-            for ur, avatar in ur_avatar_result.all():
+            for ur in ur_avatar_result.scalars().all():
                 if ur.nickname:
                     nickname_map[ur.user_ip] = ur.nickname
-                if avatar:
-                    avatar_map[ur.user_ip] = avatar.avatar_path
+                if ur.avatar:
+                    avatar_map[ur.user_ip] = ur.avatar.avatar_path
 
         for msg in history:
             await websocket.send_json({
@@ -514,7 +541,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 "user": msg.user_ip,
                 "nickname": nickname_map.get(msg.user_ip, msg.user_ip),
                 "avatar": avatar_map.get(msg.user_ip, DEFAULT_AVATAR),
-                "timestamp": msg.timestamp,
+                "timestamp": msg.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
                 "message_type": msg.message_type
             })
     
@@ -529,35 +556,34 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
             if not clean_text and text_content:
                 clean_text = "[包含不安全内容]"
             
-            # 准备要广播的消息
+            # 准备要广播的消息和持久化
             async with AsyncSessionLocal() as session:
+                # 获取发送者信息
                 ur_res = await session.execute(
-                    select(DBUserRoom, DBAvatar)
-                    .outerjoin(DBAvatar, DBUserRoom.avatar_id == DBAvatar.id)
+                    select(DBUserRoom)
+                    .options(joinedload(DBUserRoom.avatar))
                     .where(DBUserRoom.user_ip == client_ip, DBUserRoom.room_id == room_id)
                 )
-                row = ur_res.first()
-                ur_obj, avatar_obj = row if row else (None, None)
+                ur_obj = ur_res.scalar_one_or_none()
                 nickname = ur_obj.nickname if ur_obj and ur_obj.nickname else client_ip
-                avatar_path = avatar_obj.avatar_path if avatar_obj else DEFAULT_AVATAR
+                avatar_path = ur_obj.avatar.avatar_path if ur_obj and ur_obj.avatar else DEFAULT_AVATAR
 
-            timestamp = get_now_time()
-            message_type = message_data.get("message_type", "text")
-            
-            # 持久化消息到数据库
-            async with AsyncSessionLocal() as session:
+                message_type = message_data.get("message_type", "text")
+                
+                # 持久化消息到数据库
                 new_msg = DBMessage(
                     room_id=room_id,
                     user_ip=client_ip,
                     text=clean_text,
-                    timestamp=timestamp,
                     message_type=message_type,
                     file_id=message_data.get("file_id")
                 )
                 session.add(new_msg)
                 await session.commit()
                 await session.refresh(new_msg)
+                
                 message_id = new_msg.id
+                timestamp_str = new_msg.timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
             broadcast_msg = {
                 "type": "message",
@@ -566,7 +592,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 "user": client_ip,
                 "nickname": nickname,
                 "avatar": avatar_path,
-                "timestamp": timestamp,
+                "timestamp": timestamp_str,
                 "message_type": message_type,
                 "file_id": message_data.get("file_id")
             }
